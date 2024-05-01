@@ -2,7 +2,7 @@
 #SBATCH -n 1                # Number of cores
 #SBATCH -N 1                # Ensure that all cores are on one machine
 #SBATCH -t 1-00:00          # Runtime in D-HH:MM, minimum of 10 minutes
-#SBATCH -p kempner  # Partition to submit to
+#SBATCH -p kempner_h100  # Partition to submit to
 #SBATCH --account kempner_pehlevan_lab
 #SBATCH --cpus-per-gpu=1
 #SBATCH --gres=gpu:1
@@ -18,4 +18,4 @@
 module load cuda cudnn
 nvidia-smi
 
-/n/home08/bbordelon/.conda/envs/flax/bin/python train_C4.py --gamma_zero 0.25 --beta 4.0 --width 256 --heads 10 --depth 4 --lr 0.05 --scale_exp 1.0 --steps 50000 --batch_size 256
+/n/home08/bbordelon/.conda/envs/flax/bin/python train_C4.py --gamma_zero 0.25 --beta 4.0 --width 128 --heads 6 --depth 4 --lr 0.005 --scale_exp 1.0 --steps 50000 --batch_size 256

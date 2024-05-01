@@ -114,12 +114,12 @@ collate_fn = lambda x: np.array([xi["input_ids"] for xi in x])
 # get the dataloader for this dataset
 dataloader = DataLoader(dataset, batch_size = BATCH_SIZE, collate_fn = collate_fn)
 
-
 class Causal_Attention(nn.Module):
 
     scale_exp: jnp.float32
     dim: int
     heads: int
+    qk_ln: bool = True
     
     def setup(self):
         
@@ -129,7 +129,9 @@ class Causal_Attention(nn.Module):
         # computes key, query, value
         self.qk_layer = nn.Dense(features = 2 * self.heads * self.dim, kernel_init = kif_qk)
         self.v_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v)
-        
+        self.out_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v)
+        self.q_norm = nn.LayerNorm()
+        self.k_norm = nn.LayerNorm()
         return
     
     def __call__(self,inputs):
@@ -137,6 +139,10 @@ class Causal_Attention(nn.Module):
         qk = self.qk_layer(inputs) / inputs.shape[-1]**(self.c)  # (batch, loc, 3*h*d)
         qk = rearrange( qk, 'b l (h d) -> b h l d' , h = self.heads) # (batch, heads, loc, d )
         q,k = jnp.split(qk, 2, axis = -1) # gives q, k each of shape ( batch, heads, loc, d )
+        if self.qk_ln:
+            q = self.q_norm( q )
+            k = self.k_norm( k )
+        
         v = self.v_layer(inputs) / jnp.sqrt( inputs.shape[-1] )
         v = rearrange(v, 'b l (h d) -> b h l d', h = self.heads)
         
@@ -145,9 +151,9 @@ class Causal_Attention(nn.Module):
         phi_A = exp_A / exp_A.sum(axis = -1)[:,:,:,jnp.newaxis]  
         
         out = jnp.einsum('ijkl,ijlm->ijkm', phi_A, v) # (batch, head, loc, d)  
-        out = rearrange(out, 'b h l d -> b l (h d)')
+        out = rearrange(out, 'b h l d -> b l (h d)') 
+        out = self.out_layer(out) / jnp.sqrt( out.shape[-1] )
         return out
-    
     
 class MLP_Block(nn.Module):
 
@@ -157,11 +163,26 @@ class MLP_Block(nn.Module):
     def __call__(self,x):
         N = self.features
         kif = nn.initializers.normal(stddev = 1.0) # O_N(1) entries
-        h = nn.Dense(features = 4*N, kernel_init = kif)(x) / jnp.sqrt(N)
+        h = nn.Dense(features = N, kernel_init = kif)(x) / jnp.sqrt(N)
         h = nn.relu(h)
-        h = nn.Dense(features = N, kernel_init = kif)(x) / jnp.sqrt(4*N)
+        h = nn.Dense(features = N, kernel_init = kif)(x) / jnp.sqrt(N)
         return h
     
+
+class PositionalEncoding(nn.Module):
+    d_model : int         # Hidden dimensionality of the input.
+    max_len : int = MAX_LEN  # Maximum length of a sequence to expect.
+    
+    def setup(self):
+        # Create matrix of [SeqLen, HiddenDim] representing the positional encoding for max_len inputs
+        self.pos_embedding = self.param('pos_embedding', 
+                                        nn.initializers.normal(stddev=1.0), 
+                                        (1, 1+self.max_len, self.d_model))
+
+    def __call__(self, x, train=True):
+        B,T,_ = x.shape
+        x = x + self.pos_embedding[:,:T]
+        return x
 
 class Transformer(nn.Module):
     """A simple Decoder only transformer"""
@@ -176,24 +197,23 @@ class Transformer(nn.Module):
     @nn.compact
     def __call__(self, x, train = True):
         N = self.heads * self.dim
-        
-        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) ) # O_N(1) entries
+        L = self.depth
+        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * L**(0.5 * (1-self.adam_scale) ) ) # O_N(1) entries
         kif0 = nn.initializers.normal(stddev = 0.0 )
         kif = nn.initializers.normal(stddev = 1.0) # O_N(1) entries
-        
-        ### TODO: add positional encoding
+        kif_last = nn.initializers.normal(stddev = L**(0.5 * (1-self.adam_scale)) * N**(-0.5*self.adam_scale) )
         
         # embed the batch x sequence integers to 
-        x = N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
-        x = nn.relu(x)
+        x = L**( -0.5 * (1-self.adam_scale) )* N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
+        x = PositionalEncoding(d_model = N)(x)
         for l in range(self.depth):
             h = nn.LayerNorm()(x)
-            x = x + self.beta/jnp.sqrt(depth) * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(h)
+            x = x + self.beta/L * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(nn.gelu(h))
             h = nn.LayerNorm()(x)
-            x = x + self.beta/jnp.sqrt(depth) * MLP_Block(features = N)(h)
+            x = x + self.beta/L * MLP_Block(features = N)(nn.gelu(h))
             
         x = nn.LayerNorm()(x)
-        x = nn.Dense(features = VOCAB_SIZE, use_bias = False, kernel_init = kif)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
+        x = L**(-0.5 * (1 - self.adam_scale ) ) * nn.Dense(features = VOCAB_SIZE, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
         return x
     
 
@@ -201,10 +221,12 @@ def train_model(param_args, opt_args, data = None, adam = False):
     
     dim, heads, depth,scale_exp, beta = param_args
     lr , gamma, T = opt_args
-    
+   
     if adam:
         adam_scale = 1
-        optimizer = optax.adam( lr / jnp.sqrt(heads*dim)  )
+        schedule = optax.warmup_cosine_decay_schedule(init_value=0.0,peak_value=lr / jnp.sqrt(heads*dim), warmup_steps=100,decay_steps=T,end_value=0.0)
+        #optimizer = optax.adamw( lr / jnp.sqrt(heads*dim) , eps = 1e-20 , weight_decay = 0.0001 )
+        optimizer = optax.adamw( schedule , eps = 1e-20 , weight_decay = 0.0 )
     else:
         adam_scale = 0
         optimizer = optax.sgd( heads * dim * gamma**2 *  lr)
@@ -224,7 +246,7 @@ def train_model(param_args, opt_args, data = None, adam = False):
     for t,batch in enumerate(dataloader):
     
         loss, grads = val_grad_fn(params, batch[:,:-1], batch[:,1:])
-        updates, opt_state = optimizer.update(grads, opt_state)
+        updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         run_loss = loss
         #run_loss =  t/(t+1) * run_loss + 1/(t+1) * loss
@@ -249,7 +271,6 @@ for i, dim in enumerate(widths):
                 args.heads = head
                 
                 run_name = get_run_name(args)
-                
                 opt_args = ( args.lr, args.gamma_zero, args.steps )
                 param_args = (dim, head, depth, args.scale_exp , args.beta )
 
