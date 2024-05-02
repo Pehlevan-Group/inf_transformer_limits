@@ -157,7 +157,7 @@ class Causal_Attention(nn.Module):
     
     def __call__(self,inputs):
         
-        qk = self.qk_layer(inputs) / inputs.shape[-1]**(self.c)  # (batch, loc, 3*h*d)
+        qk = self.qk_layer(inputs) / self.heads**(0.5) / self.dim**(self.c)  # (batch, loc, 3*h*d)
         qk = rearrange( qk, 'b l (h d) -> b h l d' , h = self.heads) # (batch, heads, loc, d )
         q,k = jnp.split(qk, 2, axis = -1) # gives q, k each of shape ( batch, heads, loc, d )
         if self.qk_ln:
@@ -253,7 +253,7 @@ def train_model(param_args, opt_args, data = None, adam = False):
         adam_scale = 0
         optimizer = optax.sgd( heads * dim *  lr)
 
-    model = Transformer(dim, heads,depth, scale_exp = scale_exp, adam_scale = adam_scale, beta = beta)
+    model = Transformer(dim, heads, depth, scale_exp = scale_exp, adam_scale = adam_scale, beta = beta)
     params = model.init(random.PRNGKey(0), jnp.ones((32,128), dtype = jnp.int32)) 
     loss_fn = jax.jit(lambda params, Xb, yb: optax.softmax_cross_entropy_with_integer_labels(logits=model.apply(params, Xb), labels=yb).mean())
     val_grad_fn = jax.jit(value_and_grad(loss_fn))
