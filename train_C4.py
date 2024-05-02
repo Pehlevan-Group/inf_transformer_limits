@@ -265,6 +265,7 @@ def train_model(param_args, opt_args, data = None, adam = False):
 
     losses = []
 
+    steps = 0
     for t,batch in enumerate(dataloader):
         
         if np.amin(np.array([len(b) for b in batch])) == MAX_LEN:
@@ -279,8 +280,10 @@ def train_model(param_args, opt_args, data = None, adam = False):
             sys.stdout.write(f'\r loss = {run_loss}')
             wandb.log({'loss': run_loss})
             losses += [run_loss]
-            if t > T:
+            steps += 1
+            if steps > T:
                 break
+                
     return losses
 
 
