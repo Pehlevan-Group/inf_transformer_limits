@@ -23,7 +23,7 @@ parser = argparse.ArgumentParser(description=''
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--mom', default=0.0, type=float, help='momentum')
 parser.add_argument('--batch_size', type=int, default=64)
-parser.add_argument('--arch', type=str, default='simple_TF')
+parser.add_argument('--arch', type=str, default='vit')
 parser.add_argument('--dataset', type=str,default = 'cifar5m')
 parser.add_argument('--optimizer', default='sgd')
 parser.add_argument('--width', type=int, default = 32)
@@ -181,6 +181,7 @@ class VIT(nn.Module):
     adam_scale: int = 0.0
     beta: jnp.float32 = 4.0
     
+    
     @nn.compact
     def __call__(self, x, train = True):
         N = self.heads * self.dim
@@ -190,14 +191,14 @@ class VIT(nn.Module):
         # patchify images
         x = rearrange(x, 'b (w p1) (h p2) c -> b (w h) (p1 p2 c)', p1 = self.patch_size, p2 = self.patch_size) # (batch, loc, patch_ch_dim )
         
-        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * L**(0.5 * (1.0-self.adam_scale)) ) # O_N(1) entries
+        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1.0-self.adam_scale)) ) # O_N(1) entries
         kif = nn.initializers.normal( stddev = 1.0 ) # O_N(1) entries
-        kif_last = nn.initializers.normal(stddev = L**(0.5 * (1-self.adam_scale) ) )
+        kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale) ) )
         
         # read-in weights
-        x = L**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first)(x) / jnp.sqrt( D * self.patch_size**2 )
+        x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first)(x) / jnp.sqrt( D * self.patch_size**2 )
         # positional encoding
-        x = PositionalEncoding(d_model = N, max_len = (32//self.patch_size)**2, scale = N**(-0.5*self.adam_scale) * L**(0.5 * (1.0-self.adam_scale)))
+        x = PositionalEncoding(d_model = N, max_len = (32//self.patch_size)**2, scale = N**(-0.5*self.adam_scale)*(L/self.beta)**(0.5 * (1.0-self.adam_scale)))
         # residual stream with pre-LN
         for l in range(self.depth):
             h = nn.LayerNorm()(x)
@@ -214,7 +215,7 @@ class VIT(nn.Module):
         # pool over spatial dimension
         x = x.mean(axis = 1) # (batch, N)
         #x = rearrange(x, 'b l d -> b (l d)')
-        x = L**(-0.5*(1-self.adam_scale)) * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
+        x = (L/self.beta)**(-0.5*(1-self.adam_scale)) * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
         return x
 
 
