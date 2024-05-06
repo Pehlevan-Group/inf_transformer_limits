@@ -2,7 +2,7 @@
 #SBATCH -n 1                # Number of cores
 #SBATCH -N 1                # Ensure that all cores are on one machine
 #SBATCH -t 0-10:00          # Runtime in D-HH:MM, minimum of 10 minutes
-#SBATCH -p kempner  # Partition to submit to
+#SBATCH -p kempner_h100  # Partition to submit to
 #SBATCH --account kempner_pehlevan_lab
 #SBATCH --cpus-per-gpu=1
 #SBATCH --gres=gpu:1
@@ -17,4 +17,4 @@ module load Mambaforge/22.11.1-fasrc01
 
 nvidia-smi
 
-/n/home08/bbordelon/.conda/envs/flax/bin/python train_vit_cifar.py --gamma_zero 0.1 --width 32 --heads 64 --depth 2 --scale_exp 1.0 --steps 20000 --lr -1 --batch_size 64
+/n/home08/bbordelon/.conda/envs/flax/bin/python train_vit_cifar.py --gamma_zero 0.05 --width 64 --heads 16 --depth 8 --beta 8.0 --scale_exp 0.5 --steps 75000 --lr -1 --batch_size 64

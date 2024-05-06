@@ -203,7 +203,7 @@ class PositionalEncoding(nn.Module):
 
     def __call__(self, x, train=True):
         B,T,_ = x.shape
-        x = x + self.pos_embedding[:,:T]
+        x = x + self.pos_embedding[:,:T] / self.scale
         return x
 
 class Transformer(nn.Module):
@@ -227,7 +227,7 @@ class Transformer(nn.Module):
                 
         # embed the batch x sequence integers to 
         x = L**( -0.5 * (1-self.adam_scale) )* N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
-        x = N**(0.5 * self.adam_scale) * L**(-0.5 * (1-self.adam_scale) ) * PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * L**(0.5 * (1-self.adam_scale)) )(x)
+        x = PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * L**(0.5 * (1-self.adam_scale)) )(x)
         for l in range(self.depth):
             h = nn.LayerNorm()(x)
             x = x + self.beta/L * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(nn.gelu(h))
