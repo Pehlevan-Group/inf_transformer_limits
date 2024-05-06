@@ -71,10 +71,9 @@ def get_run_name(args):
 
 
 
-
 # MHSA attention layer
 class Attention(nn.Module):
-
+    """Multi-head Self-Attention Layer"""
     scale_exp: jnp.float32
     dim: int
     heads: int
@@ -86,8 +85,9 @@ class Attention(nn.Module):
         kif_qk = nn.initializers.normal(stddev = self.dim**(self.c - 0.5) ) # possibly needs to be scaled with N
         kif_v =  nn.initializers.normal(stddev = 1.0 ) # O_N(1) entries
         # computes key, query, value
-        self.qk_layer = nn.Dense(features = 2 * self.heads * self.dim, kernel_init = kif_qk)
-        self.v_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v)
+        self.qk_layer = nn.Dense(features = 2 * self.heads * self.dim, kernel_init = kif_qk, use_bias = False)
+        self.v_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v, use_bias = False)
+        self.out_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kiv_f, use_bias = False)
         self.norm_q = nn.LayerNorm()
         self.norm_k = nn.LayerNorm()
         return
@@ -108,10 +108,11 @@ class Attention(nn.Module):
         phi_A = softmax( A, axis=-1 )
         out = jnp.einsum('ijkl,ijlm->ijkm', phi_A, v) # (batch, head, loc, d)  
         out = rearrange(out, 'b h l d -> b l (h d)')
+        out = self.out_layer(out) / jnp.sqrt( out.shape[-1] )
         return out
     
 class MLP_Block(nn.Module):
-
+    """Two Layer MLP Block"""
     features: int
     
     @nn.compact
@@ -123,8 +124,8 @@ class MLP_Block(nn.Module):
         h = nn.Dense(features = N, kernel_init = kif)(h) / jnp.sqrt(N)
         return h
 
-
 class PositionalEncoding(nn.Module):
+    """Trainable Positional Encoding"""
     d_model : int         # Hidden dimensionality of the input.
     max_len : int  # Maximum length of a sequence to expect.
     scale: jnp.float32 # scale parameter for initialization
@@ -142,8 +143,7 @@ class PositionalEncoding(nn.Module):
 
 class simple_TF(nn.Module):
     
-    # simple TF like model with
-    # 1. 1/L scaling
+    """Simple TF Like Model, Easy to Analyze"""
     dim: int
     heads: int
     depth: int
@@ -161,11 +161,11 @@ class simple_TF(nn.Module):
         # patchify images
         x = rearrange(x, 'b (w p1) (h p2) c -> b (w h) (p1 p2 c)', p1 = self.patch_size, p2 = self.patch_size) # (batch, loc, patch_ch_dim )
         
-        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * L**(0.5 * (1.0-self.adam_scale)) ) # O_N(1) entries
+        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1.0-self.adam_scale)) ) # O_N(1) entries
         kif = nn.initializers.normal( stddev = 1.0 ) # O_N(1) entries
-        kif_last = nn.initializers.normal(stddev = L**(0.5 * (1-self.adam_scale) ) )
+        kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale) ) )
         
-        x = L**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first)(x) / jnp.sqrt( D * self.patch_size**2 )
+        x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first)(x) / jnp.sqrt( D * self.patch_size**2 )
         for l in range(self.depth):
             h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)( nn.gelu(x) ) 
             h = nn.Dense(features = N, kernel_init = kif)( nn.gelu(h) ) / jnp.sqrt(N)
@@ -173,14 +173,13 @@ class simple_TF(nn.Module):
             
         # pool over location index
         x = x.mean(axis = 1) # (batch, N)
-        #x = rearrange(x, 'b l d -> b (l d)')
-        x = L**(-0.5*(1-self.adam_scale)) * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
+        x = (L/self.beta)**(-0.5*(1-self.adam_scale)) * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
         return x
 
 
 class VIT(nn.Module):
     
-    # simple VIT model with
+    "simple VIT model with "
     dim: int
     heads: int
     depth: int
@@ -210,19 +209,16 @@ class VIT(nn.Module):
         # residual stream with pre-LN
         for l in range(self.depth):
             h = nn.LayerNorm()(x)
-            h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)( h )
+            h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads, qk_layernorm = True)( h )
             x = x + self.beta / L * h
             h = nn.LayerNorm()(x)
-            h = nn.Dense(features = N, kernel_init = kif)( h ) / jnp.sqrt(N)
-            h = nn.gelu(h)
-            h = nn.Dense(features = N, kernel_init = kif)( h ) / jnp.sqrt(N)
+            h = MLP_Block(features = N)(h)
             x = x + self.beta / L * h
         
         # last norm layer
         x = nn.LayerNorm()(x)
         # pool over spatial dimension
         x = x.mean(axis = 1) # (batch, N)
-        #x = rearrange(x, 'b l d -> b (l d)')
         x = (L/self.beta)**(-0.5*(1-self.adam_scale)) * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
         return x
 

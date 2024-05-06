@@ -220,14 +220,14 @@ class Transformer(nn.Module):
     def __call__(self, x, train = True):
         N = self.heads * self.dim
         L = self.depth
-        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1-self.adam_scale) ) ) # O_N(1) entries
+        kif_first = nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1-self.adam_scale) ) ) # O_N(1) entries
         kif0 = nn.initializers.normal(stddev = 0.0 )
         kif = nn.initializers.normal(stddev = 1.0) # O_N(1) entries
         kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale)) * N**(-0.5*self.adam_scale) )
                 
         # embed the batch x sequence integers to 
         x = (L/self.beta)**( -0.5 * (1-self.adam_scale) )* N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
-        x = PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1-self.adam_scale)) )(x)
+        x = PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 *(1-self.adam_scale)) )(x)
         for l in range(self.depth):
             h = nn.LayerNorm()(x)
             x = x + self.beta/L * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(h)
@@ -247,15 +247,15 @@ def train_model(param_args, opt_args, data = None, adam = False):
    
     if adam:
         adam_scale = 1
-        schedule = optax.warmup_cosine_decay_schedule(init_value=0.0,peak_value=lr / jnp.sqrt(heads*dim), warmup_steps=100,decay_steps=T,end_value=0.0)
+        schedule = optax.warmup_cosine_decay_schedule(init_value=0.0, peak_value = lr / jnp.sqrt(heads*dim), warmup_steps=100,decay_steps=T,end_value=0.0)
         optimizer = optax.adamw( schedule , eps = 1e-20 , weight_decay = 0.0 )
     else:
         adam_scale = 0
-        optimizer = optax.sgd( heads * dim *  lr)
+        optimizer = optax.sgd( gamma**2 * heads * dim *  lr )
 
     model = Transformer(dim, heads, depth, scale_exp = scale_exp, adam_scale = adam_scale, beta = beta)
     params = model.init(random.PRNGKey(0), jnp.ones((32,128), dtype = jnp.int32)) 
-    loss_fn = jax.jit(lambda params, Xb, yb: optax.softmax_cross_entropy_with_integer_labels(logits=model.apply(params, Xb), labels=yb).mean())
+    loss_fn = jax.jit(lambda params, Xb, yb: optax.softmax_cross_entropy_with_integer_labels(logits=model.apply(params, Xb) / gamma , labels=yb).mean())
     val_grad_fn = jax.jit(value_and_grad(loss_fn))
 
 
