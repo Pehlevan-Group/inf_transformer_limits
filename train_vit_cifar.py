@@ -21,7 +21,7 @@ parser = argparse.ArgumentParser(description=''
     ''', formatter_class=argparse.RawTextHelpFormatter)
 
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
-parser.add_argument('--mom', default=0.0, type=float, help='momentum')
+parser.add_argument('--mom', default=0.9, type=float, help='momentum')
 parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--arch', type=str, default='vit')
 parser.add_argument('--dataset', type=str,default = 'cifar5m')
@@ -78,6 +78,7 @@ class Attention(nn.Module):
     scale_exp: jnp.float32
     dim: int
     heads: int
+    qk_layernorm: bool = False
     
     def setup(self):
         
@@ -87,6 +88,8 @@ class Attention(nn.Module):
         # computes key, query, value
         self.qk_layer = nn.Dense(features = 2 * self.heads * self.dim, kernel_init = kif_qk)
         self.v_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v)
+        self.norm_q = nn.LayerNorm()
+        self.norm_k = nn.LayerNorm()
         return
     
     def __call__(self,inputs):
@@ -94,6 +97,11 @@ class Attention(nn.Module):
         qk = self.qk_layer(inputs) / self.heads**(0.5) / self.dim**(self.c) / jnp.sqrt(2.0)
         qk = rearrange( qk, 'b l (h d) -> b h l d' , h = self.heads) # (batch, heads, loc, d )
         q,k = jnp.split(qk, 2, axis = -1) # gives q, k each of shape ( batch, heads, loc, d )
+        
+        if self.qk_layernorm:
+            q = self.norm_q(q)
+            k = self.norm_k(k)
+            
         v = self.v_layer(inputs) / jnp.sqrt( inputs.shape[-1] )
         v = rearrange(v, 'b l (h d) -> b h l d', h = self.heads)
         A = 1.0/ self.dim**(self.scale_exp) * jnp.einsum('ijkl,ijml->ijkm', q, k) # batch x heads x loc x loc
@@ -198,7 +206,7 @@ class VIT(nn.Module):
         # read-in weights
         x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first)(x) / jnp.sqrt( D * self.patch_size**2 )
         # positional encoding
-        x = PositionalEncoding(d_model = N, max_len = (32//self.patch_size)**2, scale = N**(-0.5*self.adam_scale)*(L/self.beta)**(0.5 * (1.0-self.adam_scale)))
+        x = PositionalEncoding(d_model = N, max_len = (32//self.patch_size)**2, scale = N**(-0.5*self.adam_scale)*(L/self.beta)**(0.5 * (1.0-self.adam_scale)))(x)
         # residual stream with pre-LN
         for l in range(self.depth):
             h = nn.LayerNorm()(x)
@@ -253,7 +261,7 @@ def get_data(dset_count):
 def train_model(param_args, opt_args, data = None, adam = False):
 
     dim, heads, depth, patch_size, scale_exp, beta = param_args
-    T, batch, gamma, lr = opt_args
+    T, batch, gamma, lr, mom = opt_args
     
     if adam:
         adam_scale = 1.0
@@ -261,7 +269,7 @@ def train_model(param_args, opt_args, data = None, adam = False):
 
     else:
         adam_scale = 0.0
-        opt_init, opt_update, get_params = optimizers.sgd( heads * dim * gamma**2 * depth *  lr)
+        opt_init, opt_update, get_params = optimizers.momentum( heads * dim * gamma**2 * depth *  lr, mom)
 
     if args.arch == "vit":
         model = VIT(dim = dim, heads = heads, depth = depth, patch_size = patch_size, scale_exp = scale_exp, adam_scale = adam_scale, beta = beta)
@@ -334,7 +342,7 @@ for i, dim in enumerate(widths):
                 run_name = get_run_name(args)
                 
                     
-                opt_args = ( args.steps , args.batch_size, args.gamma_zero, args.lr )
+                opt_args = ( args.steps , args.batch_size, args.gamma_zero, args.lr, args.mom )
                 param_args = (dim, head, depth, args.patch_size, args.scale_exp , args.beta )
 
                 wandb.init(

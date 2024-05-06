@@ -220,22 +220,22 @@ class Transformer(nn.Module):
     def __call__(self, x, train = True):
         N = self.heads * self.dim
         L = self.depth
-        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * L**(0.5 * (1-self.adam_scale) ) ) # O_N(1) entries
+        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1-self.adam_scale) ) ) # O_N(1) entries
         kif0 = nn.initializers.normal(stddev = 0.0 )
         kif = nn.initializers.normal(stddev = 1.0) # O_N(1) entries
-        kif_last = nn.initializers.normal(stddev = L**(0.5 * (1-self.adam_scale)) * N**(-0.5*self.adam_scale) )
+        kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale)) * N**(-0.5*self.adam_scale) )
                 
         # embed the batch x sequence integers to 
-        x = L**( -0.5 * (1-self.adam_scale) )* N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
-        x = PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * L**(0.5 * (1-self.adam_scale)) )(x)
+        x = (L/self.beta)**( -0.5 * (1-self.adam_scale) )* N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
+        x = PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1-self.adam_scale)) )(x)
         for l in range(self.depth):
             h = nn.LayerNorm()(x)
-            x = x + self.beta/L * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(nn.gelu(h))
+            x = x + self.beta/L * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(h)
             h = nn.LayerNorm()(x)
-            x = x + self.beta/L * MLP_Block(features = N)(nn.gelu(h))
+            x = x + self.beta/L * MLP_Block(features = N)(h)
             
         x = nn.LayerNorm()(x)
-        x = L**(-0.5 * (1 - self.adam_scale ) ) * nn.Dense(features = VOCAB_SIZE, use_bias = True, kernel_init = kif0)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
+        x = (L/self.beta)**(-0.5 * (1 - self.adam_scale ) ) * nn.Dense(features = VOCAB_SIZE, use_bias = True, kernel_init = kif0)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
         return x
     
     
