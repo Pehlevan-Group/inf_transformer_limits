@@ -12,7 +12,9 @@ import sys
 import wandb
 import argparse
 import os
-
+from flax.training import orbax_utils
+from flax.training import checkpoints, train_state
+import orbax.checkpoint
 
 
 parser = argparse.ArgumentParser(description=''
@@ -58,6 +60,8 @@ else:
     
 if args.lr == -1:
     lrs = np.logspace(-2.5,1.0,12)
+elif args.lr == -2:
+    lrs = np.logspace(-3, 0.0, 12)
 else:
     lrs = [args.lr]
 
@@ -70,6 +74,19 @@ def get_run_name(args):
     return "model_{}/dataset_{}/lr_{:.4f}/mom_{:.2f}/batch_size_{}/steps_{}/width_{}/heads_{}/depth_{}/scale_exp_{}/beta_{}/gamma_zero_{}".format(args.arch, args.dataset, args.lr, args.mom, args.batch_size, args.steps, args.width, args.heads, args.depth, args.scale_exp, args.beta, args.gamma_zero)
 
 
+class LN_Fixed(nn.Module):
+    
+    eps: jnp.float32 = 1.0e-6
+    @nn.compact
+    
+    def __call__(self, x):
+        
+        features = x.shape[-1] # number of features
+        
+        mean = jnp.mean( x , axis = -1 ) # mean of x
+        var = jnp.var( x , axis = -1 )
+        out = (x - mean[:,:,jnp.newaxis] ) / jnp.sqrt( var[:,:,jnp.newaxis] + self.eps )
+        return out
 
 # MHSA attention layer
 class Attention(nn.Module):
@@ -87,9 +104,11 @@ class Attention(nn.Module):
         # computes key, query, value
         self.qk_layer = nn.Dense(features = 2 * self.heads * self.dim, kernel_init = kif_qk, use_bias = False)
         self.v_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v, use_bias = False)
-        self.out_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kiv_f, use_bias = False)
-        self.norm_q = nn.LayerNorm()
-        self.norm_k = nn.LayerNorm()
+        self.out_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v, use_bias = False)
+        #self.norm_q = nn.LayerNorm()
+        #self.norm_k = nn.LayerNorm()
+        self.norm_q = LN_Fixed()
+        self.norm_k = LN_Fixed()
         return
     
     def __call__(self,inputs):
@@ -98,7 +117,7 @@ class Attention(nn.Module):
         qk = rearrange( qk, 'b l (h d) -> b h l d' , h = self.heads) # (batch, heads, loc, d )
         q,k = jnp.split(qk, 2, axis = -1) # gives q, k each of shape ( batch, heads, loc, d )
         
-        if self.qk_layernorm:
+        if self.qk_layernorm: 
             q = self.norm_q(q)
             k = self.norm_k(k)
             
@@ -119,9 +138,9 @@ class MLP_Block(nn.Module):
     def __call__(self,x):
         N = self.features
         kif = nn.initializers.normal(stddev = 1.0) # O_N(1) entries
-        h = nn.Dense(features = N, kernel_init = kif)(x) / jnp.sqrt(N)
+        h = nn.Dense(features = N, kernel_init = kif, use_bias = False)(x) / jnp.sqrt(N)
         h = nn.gelu(h)
-        h = nn.Dense(features = N, kernel_init = kif)(h) / jnp.sqrt(N)
+        h = nn.Dense(features = N, kernel_init = kif, use_bias = False)(h) / jnp.sqrt(N)
         return h
 
 class PositionalEncoding(nn.Module):
@@ -165,10 +184,10 @@ class simple_TF(nn.Module):
         kif = nn.initializers.normal( stddev = 1.0 ) # O_N(1) entries
         kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale) ) )
         
-        x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first)(x) / jnp.sqrt( D * self.patch_size**2 )
+        x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first, use_bias = False)(x) / jnp.sqrt( D * self.patch_size**2 )
         for l in range(self.depth):
             h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)( nn.gelu(x) ) 
-            h = nn.Dense(features = N, kernel_init = kif)( nn.gelu(h) ) / jnp.sqrt(N)
+            h = nn.Dense(features = N, kernel_init = kif, use_bias = False)( nn.gelu(h) ) / jnp.sqrt(N)
             x = x + self.beta / L * h
             
         # pool over location index
@@ -203,20 +222,20 @@ class VIT(nn.Module):
         kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale) ) )
         
         # read-in weights
-        x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first)(x) / jnp.sqrt( D * self.patch_size**2 )
+        x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first, use_bias = False)(x) / jnp.sqrt( D * self.patch_size**2 )
         # positional encoding
         x = PositionalEncoding(d_model = N, max_len = (32//self.patch_size)**2, scale = N**(-0.5*self.adam_scale)*(L/self.beta)**(0.5 * (1.0-self.adam_scale)))(x)
         # residual stream with pre-LN
         for l in range(self.depth):
-            h = nn.LayerNorm()(x)
-            h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads, qk_layernorm = True)( h )
+            h = LN_Fixed()(x)
+            h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)( h )
             x = x + self.beta / L * h
-            h = nn.LayerNorm()(x)
+            h = LN_Fixed()(x)
             h = MLP_Block(features = N)(h)
             x = x + self.beta / L * h
         
         # last norm layer
-        x = nn.LayerNorm()(x)
+        x = LN_Fixed()(x)
         # pool over spatial dimension
         x = x.mean(axis = 1) # (batch, N)
         x = (L/self.beta)**(-0.5*(1-self.adam_scale)) * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
@@ -321,7 +340,7 @@ def train_model(param_args, opt_args, data = None, adam = False):
             
         opt_state = opt_update(t,grad_fn(get_params(opt_state), Xt, yt),opt_state)
     
-    return losses
+    return losses, get_params(opt_state), model
 
 
 # sweep over width, depth, gates, and lrs
@@ -336,7 +355,6 @@ for i, dim in enumerate(widths):
                 args.heads = head
                 
                 run_name = get_run_name(args)
-                
                     
                 opt_args = ( args.steps , args.batch_size, args.gamma_zero, args.lr, args.mom )
                 param_args = (dim, head, depth, args.patch_size, args.scale_exp , args.beta )
@@ -347,7 +365,23 @@ for i, dim in enumerate(widths):
                     config=args.__dict__)
                 
                 wandb.run.name = run_name
-                losses = train_model(param_args, opt_args, data = None)
+                losses, params, model = train_model(param_args, opt_args, data = None)
                 save_path = os.path.join(save_dir, run_name.replace("/", "-"))
                 np.save(save_path, losses)
+                
+                
+                
+                
+                if args.save_model:
+                    state = train_state.TrainState.create(
+                        apply_fn=model.apply,
+                        params=params,
+                        tx= optax.sgd(lr))
+                    
+                    ckpt = {'model': state, 'config': args, 'losses': losses}
+                    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                    save_args = orbax_utils.save_args_from_target(ckpt)
+                    orbax_checkpointer.save(save_path + '_ckpts', ckpt, save_args=save_args)
+
+                
                 wandb.finish()
