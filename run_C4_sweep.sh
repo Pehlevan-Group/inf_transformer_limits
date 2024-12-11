@@ -18,4 +18,4 @@
 module load cuda cudnn
 nvidia-smi
 
-/n/home08/bbordelon/.conda/envs/flax/bin/python train_C4.py --gamma_zero 0.25 --beta 12.0 --width 16 --heads 4 --depth 16 --lr 0.05 --scale_exp 1.0 --steps 10000 --batch_size 128
+/n/home08/bbordelon/.conda/envs/flax/bin/python train_C4.py --gamma_zero 0.25 --beta 8.0 --width 128 --heads 16 --depth 4 --lr 40.0 --optimizer sgd --scale_exp 1.0 --steps 500000 --batch_size 128

@@ -37,6 +37,7 @@ parser.add_argument('--beta', type=float, default=4.0,
 parser.add_argument('--gamma_zero', type=float, default=0.1,
                          help='controls the amount of feature learning.')
 parser.add_argument('--scale_exp', type=float, default=1.0)
+parser.add_argument('--depth_exp', type=float, default=1.0)
 parser.add_argument('--steps',type=int, default = 2500)
 parser.add_argument('--save_model', action='store_true')
 
@@ -65,13 +66,14 @@ elif args.lr == -2:
 else:
     lrs = [args.lr]
 
+depth_exp = args.depth_exp
 beta = args.beta
 
 save_dir = '/n/holyscratch01/pehlevan_lab/Users/bbordelon/bbordelon/Learn_gates/cifar_VIT'
 
 
 def get_run_name(args):
-    return "model_{}/dataset_{}/lr_{:.4f}/mom_{:.2f}/batch_size_{}/steps_{}/width_{}/heads_{}/depth_{}/scale_exp_{}/beta_{}/gamma_zero_{}".format(args.arch, args.dataset, args.lr, args.mom, args.batch_size, args.steps, args.width, args.heads, args.depth, args.scale_exp, args.beta, args.gamma_zero)
+    return "model_{}/dataset_{}/lr_{:.4f}/mom_{:.2f}/batch_size_{}/steps_{}/width_{}/heads_{}/depth_{}/scale_exp_{}/depth_exp_{}/beta_{}/gamma_zero_{}".format(args.arch, args.dataset, args.lr, args.mom, args.batch_size, args.steps, args.width, args.heads, args.depth, args.scale_exp, args.depth_exp, args.beta, args.gamma_zero)
 
 
 class LN_Fixed(nn.Module):
@@ -180,15 +182,9 @@ class simple_TF(nn.Module):
         # patchify images
         x = rearrange(x, 'b (w p1) (h p2) c -> b (w h) (p1 p2 c)', p1 = self.patch_size, p2 = self.patch_size) # (batch, loc, patch_ch_dim )
         
-        
-        L0 = 2.0
-        L_scale_factor = (L / L0)**(-0.5 * (1.0-self.adam_scale) * ( 2*self.depth_exp - 1.0 ) )
-        
         kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1.0-self.adam_scale)) ) # O_N(1) entries
         kif = nn.initializers.normal( stddev = 1.0 ) # O_N(1) entries
         kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale) ) )
-        
-        
         
         x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first, use_bias = False)(x) / jnp.sqrt( D * self.patch_size**2 )
         for l in range(self.depth):
@@ -210,9 +206,10 @@ class VIT(nn.Module):
     depth: int
     patch_size: int
     scale_exp: jnp.float32 = 1.0
+    depth_exp: jnp.float32=1.0
     adam_scale: int = 0.0
     beta: jnp.float32 = 4.0
-    
+    L0: jnp.float32 = 2.0
     
     @nn.compact
     def __call__(self, x, train = True):
@@ -223,30 +220,36 @@ class VIT(nn.Module):
         # patchify images
         x = rearrange(x, 'b (w p1) (h p2) c -> b (w h) (p1 p2 c)', p1 = self.patch_size, p2 = self.patch_size) # (batch, loc, patch_ch_dim )
         
-        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1.0-self.adam_scale)) ) # O_N(1) entries
+        L0 = self.L0
+        
+        L_scale_factor = (L / L0)**(-0.5 * (1.0-self.adam_scale) * ( 2*self.depth_exp - 1.0 ) )
+
+        kif_first= nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) / L_scale_factor ) # O_N(1) entries
         kif = nn.initializers.normal( stddev = 1.0 ) # O_N(1) entries
-        kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale) ) )
+        kif_last = nn.initializers.normal(stddev = 1.0 / L_scale_factor )
+        
         
         # read-in weights
-        x = (L/self.beta)**(-0.5 * (1.0-self.adam_scale)) * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first, use_bias = False)(x) / jnp.sqrt( D * self.patch_size**2 )
+        x = L_scale_factor * N**(0.5 * self.adam_scale) * nn.Dense(features = N, kernel_init = kif_first, use_bias = False)(x) / jnp.sqrt( D * self.patch_size**2 )
         # positional encoding
-        x = PositionalEncoding(d_model = N, max_len = (32//self.patch_size)**2, scale = N**(-0.5*self.adam_scale)*(L/self.beta)**(0.5 * (1.0-self.adam_scale)))(x)
+        #x = PositionalEncoding(d_model = N, max_len = (32//self.patch_size)**2, scale = N**(-0.5*self.adam_scale) / L_scale_factor)(x)
         # residual stream with pre-LN
         for l in range(self.depth):
             h = LN_Fixed()(x)
-            h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)( h )
-            x = x + self.beta / L * h
+            h = Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads )( h )
+            x = x + self.beta * (L / L0)**(-self.depth_exp) * h
             h = LN_Fixed()(x)
             h = MLP_Block(features = N)(h)
-            x = x + self.beta / L * h
+            x = x + self.beta * (L / L0)**(-self.depth_exp) * h
         
         # last norm layer
         x = LN_Fixed()(x)
         # pool over spatial dimension
         x = x.mean(axis = 1) # (batch, N)
-        x = (L/self.beta)**(-0.5*(1-self.adam_scale)) * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
+        x = L_scale_factor * nn.Dense(features = 10, use_bias = False, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
         return x
 
+    
 
     
 
@@ -281,8 +284,10 @@ def get_data(dset_count):
 
 def train_model(param_args, opt_args, data = None, adam = False):
 
-    dim, heads, depth, patch_size, scale_exp, beta = param_args
+    dim, heads, depth, patch_size, scale_exp, depth_exp, beta = param_args
     T, batch, gamma, lr, mom = opt_args
+    
+    L0 = 2.0
     
     if adam:
         adam_scale = 1.0
@@ -290,12 +295,12 @@ def train_model(param_args, opt_args, data = None, adam = False):
 
     else:
         adam_scale = 0.0
-        opt_init, opt_update, get_params = optimizers.momentum( heads * dim * gamma**2 * depth *  lr, mom)
+        opt_init, opt_update, get_params = optimizers.momentum( heads * dim * gamma**2 * (depth / L0)**(2 * depth_exp - 1.0) *  lr, mom)
 
     if args.arch == "vit":
-        model = VIT(dim = dim, heads = heads, depth = depth, patch_size = patch_size, scale_exp = scale_exp, adam_scale = adam_scale, beta = beta)
+        model = VIT(dim = dim, heads = heads, depth = depth, patch_size = patch_size, scale_exp = scale_exp, depth_exp = depth_exp, adam_scale = adam_scale, beta = beta)
     else:
-        model = simple_TF(dim = dim, heads = heads, depth = depth, patch_size = patch_size, scale_exp = scale_exp, adam_scale = adam_scale, beta = beta)
+        model = simple_TF(dim = dim, heads = heads, depth = depth, patch_size = patch_size, scale_exp = scale_exp, depth_exp=depth_exp, adam_scale = adam_scale, beta = beta)
 
     
     params = model.init(random.PRNGKey(0), jnp.ones((4,32,32,3)) )['params']                                                               
@@ -326,13 +331,11 @@ def train_model(param_args, opt_args, data = None, adam = False):
             
                 if dset_count < 4:
                     dset_count += 1
-                    X, y = get_data(dset_count)
-                    ind = 0
                 else:
                     dset_count = 0
-                    X, y = get_data(dset_count)
-                    ind = 0
-                    #return losses
+                    
+                X, y = get_data(dset_count)
+                ind = 0
         else:
             ind = (t*batch) % X.shape[0]
         Xt = X[ind:ind+batch]
@@ -366,7 +369,7 @@ for i, dim in enumerate(widths):
                 run_name = get_run_name(args)
                     
                 opt_args = ( args.steps , args.batch_size, args.gamma_zero, args.lr, args.mom )
-                param_args = (dim, head, depth, args.patch_size, args.scale_exp , args.beta )
+                param_args = (dim, head, depth, args.patch_size, args.scale_exp , args.depth_exp , args.beta )
 
                 wandb.init(
                     project="scaling_NL",
@@ -377,7 +380,6 @@ for i, dim in enumerate(widths):
                 losses, params, model = train_model(param_args, opt_args, data = None)
                 save_path = os.path.join(save_dir, run_name.replace("/", "-"))
                 np.save(save_path, losses)
-                
                 
                 
                 

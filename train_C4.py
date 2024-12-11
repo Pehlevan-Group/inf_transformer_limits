@@ -15,7 +15,7 @@ import os
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from transformers import GPT2TokenizerFast
+from transformers import GPT2TokenizerFast, T5TokenizerFast
 from itertools import chain
 
 
@@ -91,7 +91,9 @@ ds = load_dataset("allenai/c4", 'en', streaming = True)['train']
 #ds = ds.with_format('jax')
 shuff_ds = ds.shuffle(seed = 0, buffer_size = 10000)
 
-tokenizer = GPT2TokenizerFast.from_pretrained("openai-community/gpt2")
+#tokenizer = GPT2TokenizerFast.from_pretrained("openai-community/gpt2")
+tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
+
 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
 VOCAB_SIZE = len(tokenizer)
@@ -135,6 +137,36 @@ collate_fn = lambda x: [ xi["input_ids"] for xi in x ]
 dataloader = DataLoader(dataset_grouped, batch_size = BATCH_SIZE, collate_fn = collate_fn)
 
 
+class LN_Fixed(nn.Module):
+
+    eps: jnp.float32 = 1.0e-6
+    @nn.compact
+
+    def __call__(self, x):
+
+        features = x.shape[-1] # number of features
+
+        mean = jnp.mean( x , axis = -1 ) # mean of x
+        var = jnp.var( x , axis = -1 )
+        out = (x - mean[:,:,jnp.newaxis] ) / jnp.sqrt( var[:,:,jnp.newaxis] + self.eps )
+        return out
+
+
+class LN_Fixed4(nn.Module):
+    
+    eps: jnp.float32 = 1.0e-6
+    @nn.compact
+    
+    def __call__(self, x):
+        
+        features = x.shape[-1] # number of features
+        
+        mean = jnp.mean( x , axis = -1 ) # mean of x
+        var = jnp.var( x , axis = -1 )
+        out = (x - mean[:,:,:,jnp.newaxis] ) / jnp.sqrt( var[:,:,:,jnp.newaxis] + self.eps )
+        return out
+
+
 class Causal_Attention(nn.Module):
 
     scale_exp: jnp.float32
@@ -151,8 +183,8 @@ class Causal_Attention(nn.Module):
         self.qk_layer = nn.Dense(features = 2 * self.heads * self.dim, kernel_init = kif_qk, use_bias = False)
         self.v_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v, use_bias = False)
         self.out_layer = nn.Dense(features = self.heads * self.dim, kernel_init = kif_v, use_bias = False)
-        self.q_norm = nn.LayerNorm()
-        self.k_norm = nn.LayerNorm()
+        self.q_norm = LN_Fixed4()
+        self.k_norm = LN_Fixed4()
         return
     
     def __call__(self,inputs):
@@ -215,27 +247,30 @@ class Transformer(nn.Module):
     scale_exp: jnp.float32
     adam_scale: int
     beta: jnp.float32
+    L0: jnp.float32 = 1.0
 
     @nn.compact
     def __call__(self, x, train = True):
         N = self.heads * self.dim
         L = self.depth
-        kif_first = nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 * (1-self.adam_scale) ) ) # O_N(1) entries
+        L0 = self.L0
+        
+        kif_first = nn.initializers.normal(stddev = N**(-0.5*self.adam_scale) * (L/L0)**(0.5 * (1-self.adam_scale) ) ) # O_N(1) entries
         kif0 = nn.initializers.normal(stddev = 0.0 )
         kif = nn.initializers.normal(stddev = 1.0) # O_N(1) entries
-        kif_last = nn.initializers.normal(stddev = (L/self.beta)**(0.5 * (1-self.adam_scale)) * N**(-0.5*self.adam_scale) )
+        kif_last = nn.initializers.normal(stddev = (L/L0)**(0.5 * (1-self.adam_scale)) * N**(-0.5*self.adam_scale) )
                 
         # embed the batch x sequence integers to 
-        x = (L/self.beta)**( -0.5 * (1-self.adam_scale) )* N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
-        x = PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * (L/self.beta)**(0.5 *(1-self.adam_scale)) )(x)
+        x = (L/L0)**(-0.5*(1-self.adam_scale))*N**(0.5 * self.adam_scale) * nn.Embed(VOCAB_SIZE, N, embedding_init = kif_first)(x) # batch x seq len x N
+        x = PositionalEncoding(d_model = N, scale = N**(-0.5*self.adam_scale) * (L/L0)**(0.5 *(1-self.adam_scale)) )(x)
         for l in range(self.depth):
-            h = nn.LayerNorm()(x)
-            x = x + self.beta/L * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(h)
-            h = nn.LayerNorm()(x)
-            x = x + self.beta/L * MLP_Block(features = N)(h)
+            h = LN_Fixed()(x)
+            x = x + self.beta/L * Causal_Attention(dim = self.dim, scale_exp = self.scale_exp, heads = self.heads)(nn.gelu(h))
+            h = LN_Fixed()(x)
+            x = x + self.beta/L * MLP_Block(features = N)(nn.gelu(h))
             
-        x = nn.LayerNorm()(x)
-        x = (L/self.beta)**(-0.5 * (1 - self.adam_scale ) ) * nn.Dense(features = VOCAB_SIZE, use_bias = True, kernel_init = kif0)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
+        x = LN_Fixed()(x)
+        x = (L / L0)**(-0.5 * (1 - self.adam_scale ) ) * nn.Dense(features = VOCAB_SIZE, use_bias = True, kernel_init = kif_last)(x) / N**(1.0-0.5*self.adam_scale)   # for mean field scaling
         return x
     
     
@@ -254,10 +289,13 @@ def train_model(param_args, opt_args, data = None, adam = False):
         optimizer = optax.sgd( gamma**2 * heads * dim *  lr )
 
     model = Transformer(dim, heads, depth, scale_exp = scale_exp, adam_scale = adam_scale, beta = beta)
-    params = model.init(random.PRNGKey(0), jnp.ones((32,128), dtype = jnp.int32)) 
-    loss_fn = jax.jit(lambda params, Xb, yb: optax.softmax_cross_entropy_with_integer_labels(logits=model.apply(params, Xb) / gamma , labels=yb).mean())
+    
+    p0 = model.init(random.PRNGKey(0), jnp.ones((32,128), dtype = jnp.int32)) 
+    
+    shift_fn = lambda p, X: (model.apply(p, X)-model.apply(p0, X)) / gamma
+    params = p0
+    loss_fn = jax.jit(lambda p, Xb, yb: optax.softmax_cross_entropy_with_integer_labels(logits=shift_fn(p,Xb), labels=yb).mean())
     val_grad_fn = jax.jit(value_and_grad(loss_fn))
-
 
     opt_state = optimizer.init(params)
 

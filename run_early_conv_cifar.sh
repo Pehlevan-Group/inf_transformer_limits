@@ -17,4 +17,4 @@ module load Mambaforge/22.11.1-fasrc01
 
 nvidia-smi
 
-/n/home08/bbordelon/.conda/envs/flax/bin/python early_conv_vit_sweeps.py --width 4 --heads -1 --depth 2 --scale_exp 1.0 --steps 1000 --batch_size 128
+/n/home08/bbordelon/.conda/envs/flax/bin/python early_conv_vit_sweeps.py --width 4 --heads 2048 --depth 2 --beta 4.0 --scale_exp 0.5 --steps 2500 --batch_size 128 --lr 0.5

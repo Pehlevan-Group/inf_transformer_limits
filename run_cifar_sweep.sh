@@ -17,4 +17,14 @@ module load Mambaforge/22.11.1-fasrc01
 
 nvidia-smi
 
-/n/home08/bbordelon/.conda/envs/flax/bin/python train_vit_cifar.py --gamma_zero 0.05 --width 64 --heads 16 --depth 8 --beta 8.0 --scale_exp 0.5 --steps 75000 --lr -1 --batch_size 64
+
+## THIS SWEEP USED IN THE PAPER
+#/n/home08/bbordelon/.conda/envs/flax/bin/python train_vit_cifar.py --save_model --gamma_zero 0.1 --width 16 --heads 16 --depth 32 --beta 4.0 --scale_exp 1.0 --steps 75000 --lr 0.2 --batch_size 64
+
+
+/n/home08/bbordelon/.conda/envs/flax/bin/python train_vit_vary_depth_cifar.py --save_model --gamma_zero 0.1 --width 8 --heads 8 --depth 32 --depth_exp 1.0 --beta 6.0 --scale_exp 1.0 --steps 500000 --lr 0.2 --batch_size 64
+
+
+
+#/n/home08/bbordelon/.conda/envs/flax/bin/python train_vit_vary_depth_cifar.py --save_model --gamma_zero 0.1 --width 16 --heads 16 --depth 64 --beta 4.0 --scale_exp 0.5 --depth_exp 0.5 --steps 75000 --lr 0.2 --batch_size 64
+
