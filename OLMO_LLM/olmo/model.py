@@ -602,6 +602,7 @@ class OLMoBlock(nn.Module):
                 attn_mask=attn_mask,
                 dropout_p=dropout_p,
                 is_causal=is_causal,
+                scale = 1.0,
             )
 
     def attention(
